@@ -1,21 +1,26 @@
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class PersonalizedMotionResidual(nn.Module):
     """
     Identity-specific low-rank motion correction.
 
+    Given the frozen EmoTaG motion feature h:
+
+        z = A h
+        delta_exp = s_exp * B_exp z
+        delta_jaw = s_jaw * B_jaw z
+
+    Therefore the personalized correction is a strict low-rank
+    linear residual whose rank is bounded by `rank`.
+
     Input:
-        encoded_motion: [B, 256]
+        encoded_motion: [..., input_dim]
 
     Output:
-        delta_exp: [B, 50]
-        delta_jaw: [B, 3]
-
-    Only trained during few-shot personalization.
+        delta_exp: [..., exp_dim]
+        delta_jaw: [..., jaw_dim]
     """
 
     def __init__(
@@ -29,46 +34,75 @@ class PersonalizedMotionResidual(nn.Module):
     ):
         super().__init__()
 
-        self.down = nn.Linear(input_dim, rank, bias=False)
+        if rank <= 0:
+            raise ValueError(
+                f"LPMR rank must be positive, got {rank}"
+            )
 
+        self.input_dim = int(input_dim)
+        self.rank = int(rank)
+        self.exp_dim = int(exp_dim)
+        self.jaw_dim = int(jaw_dim)
+
+        # A: R^D -> R^r
+        self.down = nn.Linear(
+            self.input_dim,
+            self.rank,
+            bias=False,
+        )
+
+        # B_exp: R^r -> R^50
         self.exp_up = nn.Linear(
-            rank, exp_dim, bias=False
+            self.rank,
+            self.exp_dim,
+            bias=False,
         )
 
+        # B_jaw: R^r -> R^3
         self.jaw_up = nn.Linear(
-            rank, jaw_dim, bias=False
+            self.rank,
+            self.jaw_dim,
+            bias=False,
         )
 
-        self.exp_scale = exp_scale
-        self.jaw_scale = jaw_scale
+        # Store scales in state_dict so that the main motion checkpoint
+        # is self-contained during inference.
+        self.register_buffer(
+            "exp_scale",
+            torch.tensor(
+                float(exp_scale),
+                dtype=torch.float32,
+            ),
+        )
 
-        # Small random down-projection
+        self.register_buffer(
+            "jaw_scale",
+            torch.tensor(
+                float(jaw_scale),
+                dtype=torch.float32,
+            ),
+        )
+
+        # Random initialization for A.
         nn.init.normal_(
             self.down.weight,
             mean=0.0,
-            std=0.02
+            std=0.02,
         )
 
-        # Zero initialization guarantees
-        # delta_motion = 0 at iteration 0
+        # Zero initialization of B makes the complete residual exactly
+        # zero at the beginning of personalization.
         nn.init.zeros_(self.exp_up.weight)
         nn.init.zeros_(self.jaw_up.weight)
 
     def forward(self, encoded_motion):
-
+        # Strict low-rank bottleneck:
+        # z = A h
         z = self.down(encoded_motion)
 
-        z = F.gelu(z)
-
-        delta_exp = (
-            self.exp_scale
-            * self.exp_up(z)
-        )
-
-        delta_jaw = (
-            self.jaw_scale
-            * self.jaw_up(z)
-        )
+        # delta = B A h
+        delta_exp = self.exp_scale * self.exp_up(z)
+        delta_jaw = self.jaw_scale * self.jaw_up(z)
 
         return {
             "delta_exp": delta_exp,

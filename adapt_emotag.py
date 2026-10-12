@@ -94,44 +94,132 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             f'Expected a 3-tuple EMA checkpoint, a 4-tuple per-scene checkpoint, or a raw state_dict.'
         )
     motion_net.load_state_dict(motion_params)
-    if adapt_adain_only:
-        motion_net.freeze_for_adaptation(unfreeze_heads=adapt_unfreeze_heads)
 
-    # ---------------------------------------
-    # LPMR: identity-specific residual
-    # ---------------------------------------
+    # ---------------------------------------------------------
+    # Configure target-identity motion personalization
+    # ---------------------------------------------------------
+
+    lpmr = None
     lpmr_optimizer = None
 
     if use_lpmr:
 
-        # Freeze the entire pretrained GRMN.
+        # -----------------------------------------------------
+        # 1. Freeze the complete pretrained EmoTaG / GRMN prior
+        # -----------------------------------------------------
         for p in motion_net.parameters():
             p.requires_grad_(False)
 
-        # Create a new low-rank residual.
+        # -----------------------------------------------------
+        # 2. Optional AdaIN adaptation
+        #
+        # --use_lpmr only
+        #     -> LPMR-only
+        #
+        # --use_lpmr --adapt_adain_only
+        #     -> AdaIN + LPMR
+        #
+        # --use_lpmr --adapt_adain_only --adapt_unfreeze_heads
+        #     -> AdaIN + prediction heads + LPMR
+        # -----------------------------------------------------
+
+        if adapt_adain_only:
+
+            for module in (
+                    motion_net.audio_adain,
+                    motion_net.au_adain,
+            ):
+                for p in module.parameters():
+                    p.requires_grad_(True)
+
+            if adapt_unfreeze_heads:
+
+                for name in (
+                        "flame_exp_head",
+                        "flame_jaw_head",
+                        "mouth_head",
+                        "mouth_mlp",
+                ):
+                    module = getattr(
+                        motion_net,
+                        name,
+                        None,
+                    )
+
+                    if module is not None:
+                        for p in module.parameters():
+                            p.requires_grad_(True)
+
+        elif adapt_unfreeze_heads:
+
+            raise ValueError(
+                "--adapt_unfreeze_heads requires "
+                "--adapt_adain_only."
+            )
+
+        # -----------------------------------------------------
+        # 3. Add the novel identity-specific low-rank module
+        # -----------------------------------------------------
+
         lpmr = motion_net.enable_personalized_residual(
             rank=lpmr_rank,
             exp_scale=lpmr_exp_scale,
             jaw_scale=lpmr_jaw_scale,
         )
 
+        # Frozen pretrained prior should be deterministic.
+        #
+        # This disables dropout in the frozen audio transformer,
+        # while still allowing gradients through it to LPMR.
+        motion_net.eval()
+
+        # LPMR itself contains no dropout/BN, but set train mode
+        # explicitly for semantic clarity.
+        lpmr.train()
+
         lpmr_optimizer = torch.optim.AdamW(
             lpmr.parameters(),
             lr=lpmr_lr,
+            betas=(0.9, 0.99),
+            eps=1e-8,
             weight_decay=0.0,
         )
 
-        # Disable updates to pretrained motion network.
-        for group in motion_optimizer.param_groups:
-            group["lr"] = 0.0
+        print(
+            "[LPMR] rank:",
+            lpmr_rank,
+        )
 
         print(
-            "[LPMR] trainable parameters:",
+            "[LPMR] trainable LPMR parameters:",
             sum(
                 p.numel()
                 for p in lpmr.parameters()
                 if p.requires_grad
             )
+        )
+
+        trainable_base = [
+            name
+            for name, p in motion_net.named_parameters()
+            if p.requires_grad
+               and not name.startswith(
+                "personalized_residual."
+            )
+        ]
+
+        print(
+            "[LPMR] additional trainable "
+            "pretrained parameters:",
+            trainable_base,
+        )
+
+
+    elif adapt_adain_only:
+
+        # Original EmoTaG adaptation path
+        motion_net.freeze_for_adaptation(
+            unfreeze_heads=adapt_unfreeze_heads
         )
     try:
         mouth_idx_path = os.path.join(dataset.source_path, 'mouth_point_indices.npy')
@@ -153,10 +241,88 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     except Exception as e:
         sys.exit(f'[adapt] Failed to load mouth_point_indices.npy for this scene: {e}')
     if checkpoint:
-        model_params, motion_params, motion_optimizer_params, first_iter = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
-        motion_net.load_state_dict(motion_params)
-        motion_optimizer.load_state_dict(motion_optimizer_params)
+
+        (
+            model_params,
+            motion_params,
+            motion_optimizer_params,
+            first_iter,
+        ) = torch.load(
+            checkpoint,
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        gaussians.restore(
+            model_params,
+            opt,
+        )
+
+        # LPMR has already been created above when
+        # --use_lpmr is enabled.
+        motion_net.load_state_dict(
+            motion_params,
+            strict=True,
+        )
+
+        motion_optimizer.load_state_dict(
+            motion_optimizer_params
+        )
+
+        # -----------------------------------------
+        # Restore LPMR optimizer state
+        # -----------------------------------------
+
+        if use_lpmr:
+
+            checkpoint_dir = os.path.dirname(
+                checkpoint
+            )
+
+            lpmr_resume_path = os.path.join(
+                checkpoint_dir,
+                f"lpmr_{first_iter}.pth",
+            )
+
+            if os.path.exists(
+                    lpmr_resume_path
+            ):
+
+                lpmr_resume = torch.load(
+                    lpmr_resume_path,
+                    map_location="cpu",
+                    weights_only=False,
+                )
+
+                saved_rank = int(
+                    lpmr_resume["rank"]
+                )
+
+                if saved_rank != lpmr_rank:
+                    raise RuntimeError(
+                        "LPMR rank mismatch: "
+                        f"checkpoint={saved_rank}, "
+                        f"current={lpmr_rank}"
+                    )
+
+                lpmr_optimizer.load_state_dict(
+                    lpmr_resume["optimizer"]
+                )
+
+                print(
+                    "[LPMR] optimizer resumed "
+                    f"from iteration {first_iter}"
+                )
+
+            else:
+
+                print(
+                    "[LPMR][warning] "
+                    "LPMR weights were restored "
+                    "from the main checkpoint, "
+                    "but optimizer state was not "
+                    f"found at {lpmr_resume_path}."
+                )
     # Adaptation caps the SH degree at 1 by default; EMOTAG_ADAPT_SH2=1 keeps the
     # full degree (args.sh_degree) for more view-dependent colour capacity.
     if not mode_long and os.environ.get('EMOTAG_ADAPT_SH2') != '1':
@@ -383,6 +549,49 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if opt.lambda_scale > 0:
                 loss = loss + opt.lambda_scale * F.relu(local_scale[vis] - opt.threshold_scale).norm(dim=1).mean()
         loss.backward()
+        if (
+                use_lpmr
+                and iteration > warm_up_iter
+                and iteration % 100 == 0
+        ):
+
+            with torch.no_grad():
+
+                delta_exp_norm = (
+                    delta_exp.detach()
+                    .norm(dim=-1)
+                    .mean()
+                    .item()
+                )
+
+                delta_jaw_norm = (
+                    delta_jaw.detach()
+                    .norm(dim=-1)
+                    .mean()
+                    .item()
+                )
+
+            grad_sq_sum = 0.0
+
+            for p in lpmr.parameters():
+
+                if p.grad is not None:
+                    grad_sq_sum += (
+                        p.grad.detach()
+                        .float()
+                        .pow(2)
+                        .sum()
+                        .item()
+                    )
+
+            grad_norm = grad_sq_sum ** 0.5
+
+            print(
+                f"\n[LPMR] iter={iteration} "
+                f"|delta_exp|={delta_exp_norm:.6e} "
+                f"|delta_jaw|={delta_jaw_norm:.6e} "
+                f"|grad|={grad_norm:.6e}"
+            )
         iter_end.record()
         with torch.no_grad():
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -412,24 +621,40 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if use_lpmr:
                     lpmr_ckpt = {
-                        "rank": lpmr_rank,
-                        "exp_scale": lpmr_exp_scale,
-                        "jaw_scale": lpmr_jaw_scale,
+                        "rank": int(lpmr_rank),
+                        "exp_scale": float(lpmr_exp_scale),
+                        "jaw_scale": float(lpmr_jaw_scale),
                         "state_dict": (
-                            motion_net.personalized_residual
+                            motion_net
+                            .personalized_residual
                             .state_dict()
                         ),
                         "optimizer": (
-                            lpmr_optimizer.state_dict()
+                            lpmr_optimizer
+                            .state_dict()
                         ),
-                        "iteration": iteration,
+                        "iteration": int(iteration),
                     }
+
+                    # Iteration-specific sidecar:
+                    # used for exact training resume.
+                    lpmr_iter_path = os.path.join(
+                        scene.model_path,
+                        f"lpmr_{iteration}.pth",
+                    )
+
+                    torch.save(
+                        lpmr_ckpt,
+                        lpmr_iter_path,
+                    )
+
+                    # Convenience latest checkpoint.
                     torch.save(
                         lpmr_ckpt,
                         os.path.join(
                             scene.model_path,
-                            "lpmr_latest.pth"
-                        )
+                            "lpmr_latest.pth",
+                        ),
                     )
                 if deform_optimizer is not None:
                     torch.save(gaussians.deform_code.detach().cpu(), scene.model_path + '/deform_code.pth')

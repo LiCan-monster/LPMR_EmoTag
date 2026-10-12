@@ -116,84 +116,92 @@ def main():
         if os.path.exists(identity_index_path):
             with open(identity_index_path) as f:
                 gaussians.identity_index = int(f.read().strip())
-        # motion_net = MotionNetwork(args=dataset).cuda()
-        # model_params, motion_params, _, _ = torch.load(
-        #     os.path.join(dataset.model_path, "chkpnt_face_latest.pth"))
-        # motion_net.load_state_dict(motion_params, strict=False)
-        # gaussians.restore(model_params, None)
-
         # ==========================================
         # Load EmoTaG + optional LPMR
         # ==========================================
-        motion_net = MotionNetwork(args=dataset).cuda()
+
+        motion_net = MotionNetwork(
+            args=dataset
+        ).cuda()
+
         checkpoint_path = os.path.join(
             dataset.model_path,
-            "chkpnt_face_latest.pth"
+            "chkpnt_face_latest.pth",
         )
-        model_params, motion_params, _, _ = torch.load(
+
+        (
+            model_params,
+            motion_params,
+            _,
+            checkpoint_iter,
+        ) = torch.load(
             checkpoint_path,
             map_location="cpu",
             weights_only=False,
         )
-        # Check whether the checkpoint contains LPMR
-        has_lpmr = any(
-            key.startswith("personalized_residual.")
-            for key in motion_params.keys()
+
+        # ==========================================
+        # Detect optional LPMR from main checkpoint
+        # ==========================================
+
+        lpmr_down_key = (
+            "personalized_residual.down.weight"
         )
+
+        has_lpmr = (
+                lpmr_down_key in motion_params
+        )
+
         if has_lpmr:
-            print("[LPMR] Personalized residual detected.")
-            lpmr_path = os.path.join(
-                dataset.model_path,
-                "lpmr_latest.pth"
+
+            # A has shape [rank, hidden_dim]
+            lpmr_rank = int(
+                motion_params[
+                    lpmr_down_key
+                ].shape[0]
             )
-            if not os.path.exists(lpmr_path):
-                raise FileNotFoundError(
-                    "LPMR weights exist in the main checkpoint, "
-                    "but lpmr_latest.pth is missing. "
-                    "The rank and scale configuration are required."
-                )
-            lpmr_info = torch.load(
-                lpmr_path,
-                map_location="cpu",
-                weights_only=False,
+
+            print(
+                "[LPMR] Personalized residual "
+                f"detected, rank={lpmr_rank}"
             )
-            # Initialize module BEFORE loading state_dict
+
+            # Scales will subsequently be overwritten
+            # by the registered buffers in state_dict.
             motion_net.enable_personalized_residual(
-                rank=int(lpmr_info["rank"]),
-                exp_scale=float(lpmr_info["exp_scale"]),
-                jaw_scale=float(lpmr_info["jaw_scale"]),
+                rank=lpmr_rank,
+                exp_scale=0.1,
+                jaw_scale=0.05,
             )
-            print(
-                "[LPMR] rank =",
-                lpmr_info["rank"]
-            )
+
         else:
+
             print(
-                "[LPMR] No personalized residual found. "
-                "Using original EmoTaG."
+                "[LPMR] No personalized residual "
+                "found. Using original EmoTaG."
             )
-        # Load all motion weights
-        load_result = motion_net.load_state_dict(
+
+        # ==========================================
+        # Strict checkpoint loading
+        # ==========================================
+
+        motion_net.load_state_dict(
             motion_params,
-            strict=False
+            strict=True,
         )
-        # Important: LPMR parameters must not be missing
+
         if has_lpmr:
-            missing_lpmr = [
-                key for key in load_result.missing_keys
-                if key.startswith("personalized_residual.")
-            ]
-            unexpected_lpmr = [
-                key for key in load_result.unexpected_keys
-                if key.startswith("personalized_residual.")
-            ]
-            if missing_lpmr or unexpected_lpmr:
-                raise RuntimeError(
-                    "LPMR checkpoint loading failed.\n"
-                    f"Missing: {missing_lpmr}\n"
-                    f"Unexpected: {unexpected_lpmr}"
-                )
-            print("[LPMR] Weights loaded successfully.")
+            print(
+                "[LPMR] Weights and scales "
+                "loaded from main checkpoint."
+            )
+
+        gaussians.restore(
+            model_params,
+            None,
+        )
+
+        motion_net.eval()
         gaussians.restore(model_params, None)
         motion_net.eval()
         # Expression-conditioned deformation prior: load the shared decoder and this

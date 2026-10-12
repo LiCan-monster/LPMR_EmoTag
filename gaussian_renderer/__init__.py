@@ -72,20 +72,65 @@ def render_motion(viewpoint_camera, pc: GaussianModel, motion_net: MotionNetwork
     preds = motion_net(audio_feat, c=ind_code, au=au_feat, identity=identity_feat)
     pred_exp_raw = preds['flame_exp']
     pred_jaw_raw = preds['flame_jaw']
+    personal_delta_exp = preds.get(
+        "personal_delta_exp",
+        None,
+    )
+    personal_delta_jaw = preds.get(
+        "personal_delta_jaw",
+        None,
+    )
     if pred_exp_raw.dim() == 1:
         pred_exp_raw = pred_exp_raw.unsqueeze(0)
+
     if pred_jaw_raw.dim() == 1:
         pred_jaw_raw = pred_jaw_raw.unsqueeze(0)
-    # The audio window holds per-frame predictions for frames [t-4, t+4); use the
-    # center frame's prediction rather than averaging, which would low-pass the
-    # articulation timing. The encoder still attends over the whole window as context.
+
+    # -------------------------------------------------
+    # Use the same center prediction for FLAME and LPMR
+    # -------------------------------------------------
+
     if pred_exp_raw.shape[0] > 1:
-        pred_exp_raw = pred_exp_raw[pred_exp_raw.shape[0] // 2].unsqueeze(0)
-    if pred_jaw_raw.shape[0] > 1:
-        pred_jaw_raw = pred_jaw_raw[pred_jaw_raw.shape[0] // 2].unsqueeze(0)
+        center_idx = pred_exp_raw.shape[0] // 2
+
+        pred_exp_raw = pred_exp_raw[
+            center_idx
+        ].unsqueeze(0)
+
+        pred_jaw_raw = pred_jaw_raw[
+            center_idx
+        ].unsqueeze(0)
+
+        if personal_delta_exp is not None:
+            personal_delta_exp = personal_delta_exp[
+                center_idx
+            ].unsqueeze(0)
+
+        if personal_delta_jaw is not None:
+            personal_delta_jaw = personal_delta_jaw[
+                center_idx
+            ].unsqueeze(0)
+
+    if (
+            personal_delta_exp is not None
+            and personal_delta_exp.dim() == 1
+    ):
+        personal_delta_exp = (
+            personal_delta_exp.unsqueeze(0)
+        )
+
+    if (
+            personal_delta_jaw is not None
+            and personal_delta_jaw.dim() == 1
+    ):
+        personal_delta_jaw = (
+            personal_delta_jaw.unsqueeze(0)
+        )
     encoded_audio_feat = preds.get('encoded_audio', None)
     pred_exp = pred_exp_raw * curriculum_weight
     pred_jaw = pred_jaw_raw * curriculum_weight
+
+
     frame_id = viewpoint_camera.talking_dict['frame_id']
     flame_params_gt = pc.flame_wrapper.load_flame_params_from_npz(frame_id)
     gt_exp_feat = flame_params_gt['expression']
@@ -205,10 +250,10 @@ def render_motion(viewpoint_camera, pc: GaussianModel, motion_net: MotionNetwork
     rendered_image, rendered_depth, rendered_norm, rendered_alpha, radii, extra = rasterizer(means3D=means3D, means2D=means2D, shs=shs, colors_precomp=colors_precomp, opacities=opacity, scales=scales, rotations=rotations, cov3Ds_precomp=None)
     return_dict = {'render': rendered_image, 'viewspace_points': screenspace_points, 'visibility_filter': radii > 0, 'depth': rendered_depth, 'alpha': rendered_alpha, 'normal': rendered_norm, 'radii': radii, 'predicted_flame_exp': pred_exp_raw, 'predicted_flame_jaw': pred_jaw_raw, 'gt_flame_exp': gt_exp_feat, 'gt_flame_pose': gt_pose, 'deformed_flame_verts': flame_verts, 'deformed_xyz': means3D, 'deformed_rotations': rotations, 'deformed_raw_scale': deformed_gaussians['raw_scale'], 'gate': preds.get('gate'), 'emotion_logits': preds.get('emotion_logits')}
     return_dict["personal_delta_exp"] = (
-        preds.get("personal_delta_exp")
+        personal_delta_exp
     )
 
     return_dict["personal_delta_jaw"] = (
-        preds.get("personal_delta_jaw")
+        personal_delta_jaw
     )
     return return_dict
