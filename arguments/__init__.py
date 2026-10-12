@@ -1,0 +1,149 @@
+from argparse import ArgumentParser, Namespace
+import sys
+import os
+
+class GroupParams:
+    pass
+
+class ParamGroup:
+
+    def __init__(self, parser: ArgumentParser, name: str, fill_none=False):
+        group = parser.add_argument_group(name)
+        for key, value in vars(self).items():
+            shorthand = False
+            if key.startswith('_'):
+                shorthand = True
+                key = key[1:]
+            t = type(value)
+            value = value if not fill_none else None
+            if shorthand:
+                if t == bool:
+                    group.add_argument('--' + key, '-' + key[0:1], '-' + key[0:1].upper(), default=value, action='store_true')
+                else:
+                    group.add_argument('--' + key, '-' + key[0:1], '-' + key[0:1].upper(), default=value, type=t)
+            elif t == bool:
+                group.add_argument('--' + key, default=value, action='store_true')
+            else:
+                group.add_argument('--' + key, default=value, type=t)
+
+    def extract(self, args):
+        group = GroupParams()
+        for arg in vars(args).items():
+            if arg[0] in vars(self) or '_' + arg[0] in vars(self):
+                setattr(group, arg[0], arg[1])
+        return group
+
+class ModelParams(ParamGroup):
+
+    def __init__(self, parser, sentinel=False):
+        self.sh_degree = 2
+        self._source_path = ''
+        self._model_path = ''
+        self._images = 'images'
+        self._resolution = -1
+        self._white_background = False
+        self.data_device = 'cuda'
+        self.eval = False
+        self.audio_file = ''
+        self.init_num = 10000
+        self.N_views = -1
+        self.audio_extractor = 'wav2vec2'
+        self.type = 'face'
+        self.preload = True
+        self.all_for_train = False
+        self.scene_names = ''
+        self.scene_names_file = ''
+        self.scene_discovery_depth = 4
+        super().__init__(parser, 'Loading Parameters', sentinel)
+
+    def extract(self, args):
+        g = super().extract(args)
+        g.source_path = os.path.abspath(g.source_path)
+        return g
+
+class PipelineParams(ParamGroup):
+
+    def __init__(self, parser):
+        self.convert_SHs_python = False
+        self.compute_cov3D_python = False
+        self.debug = False
+        super().__init__(parser, 'Pipeline Parameters')
+
+class OptimizationParams(ParamGroup):
+
+    def __init__(self, parser):
+        self.iterations = 50000
+        self.position_lr_init = 0.00016
+        self.position_lr_final = 1.6e-06
+        self.position_lr_delay_mult = 0.01
+        self.position_lr_max_steps = 45000
+        self.feature_lr = 0.0025
+        self.opacity_lr = 0.05
+        self.scaling_lr = 0.003
+        self.rotation_lr = 0.001
+        self.percent_dense = 0.005
+        self.lambda_dssim = 0.2
+        self.densification_interval = 100
+        self.opacity_reset_interval = 3000
+        self.densify_from_iter = 500
+        self.densify_until_iter = 15000
+        self.densify_grad_threshold = 0.0002
+        self.random_background = False
+        self.warm_up_iter_per_scene = 500
+        # Fraction of total iterations used to ramp curriculum_weight 0 -> 1 after warmup.
+        self.curriculum_ratio = 0.1
+        self.w_flame_reg = 0.1
+        # Extra weight on the jaw term inside flame_reg. Jaw pose (3 dims, radians,
+        # MSE ~1e-3) is the lip-sync driver but is drowned by the 50-dim expression
+        # MSE (~0.2-0.8); without reweighting the jaw regression tends to collapse
+        # toward the mean.
+        self.w_jaw_reg = 100.0
+        self.batch_size = 6
+        # Semantic Emotion Guidance (DeepFace teacher) loss weights.
+        self.w_emotion_kl = 0.01
+        self.w_emotion_score = 0.1
+        # Geometric loss (Sapiens depth/normal priors) weights, adaptation only.
+        self.w_geo_depth = 0.01
+        self.w_geo_normal = 0.001
+        # GaussianAvatars-style anti-drift regularizers (adaptation only): penalize
+        # gaussian offsets / scales that exceed a threshold measured in units of the
+        # parent FLAME triangle's size. Defaults follow GaussianAvatars.
+        self.lambda_xyz = 0.01
+        self.threshold_xyz = 1.0
+        self.lambda_scale = 1.0
+        self.threshold_scale = 0.6
+        # Perceptual (LPIPS) loss in the adaptation dynamic stage. The L1/SSIM optimum
+        # under residual geometric misalignment is a motion-blurred average texture on
+        # frames away from the adaptation set; a perceptual term preserves
+        # high-frequency facial detail. 0 disables.
+        self.w_lpips = 0.1
+        # Extra photometric weight on the lips_rect crop during adaptation. The mouth
+        # interior (teeth/tongue) is visible in only a handful of the 125 adaptation
+        # frames and gets almost no gradient share from full-frame losses; the
+        # original pipeline had a dedicated mouth training stage for this. 0 disables.
+        self.w_mouth_crop = 0.5
+        # Cap the intra-oral gaussian set at this multiple of its anatomical initial
+        # count during adaptation: enough headroom for teeth/tongue detail while
+        # preventing the mouth set from growing to dominate the whole head.
+        self.mouth_budget_factor = 4.0
+        super().__init__(parser, 'Optimization Parameters')
+
+def get_combined_args(parser: ArgumentParser):
+    cmdlne_string = sys.argv[1:]
+    cfgfile_string = 'Namespace()'
+    args_cmdline = parser.parse_args(cmdlne_string)
+    try:
+        cfgfilepath = os.path.join(args_cmdline.model_path, 'cfg_args')
+        print('Looking for config file in', cfgfilepath)
+        with open(cfgfilepath) as cfg_file:
+            print('Config file found: {}'.format(cfgfilepath))
+            cfgfile_string = cfg_file.read()
+    except TypeError:
+        print('Config file not found at')
+        pass
+    args_cfgfile = eval(cfgfile_string)
+    merged_dict = vars(args_cfgfile).copy()
+    for k, v in vars(args_cmdline).items():
+        if v != None:
+            merged_dict[k] = v
+    return Namespace(**merged_dict)
