@@ -202,8 +202,6 @@ def main():
         )
 
         motion_net.eval()
-        gaussians.restore(model_params, None)
-        motion_net.eval()
         # Expression-conditioned deformation prior: load the shared decoder and this
         # identity's fitted code if the adaptation produced one.
         deform_code_path = os.path.join(dataset.model_path, "deform_code.pth")

@@ -612,54 +612,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration in saving_iterations and iteration > warm_up_iter and 'deformed_xyz' in render_pkg:
                 print('\n[ITER {}] Saving Gaussians'.format(iteration))
                 scene.save_deformed(str(iteration) + '_face', render_pkg['deformed_xyz'], render_pkg['deformed_rotations'], render_pkg['deformed_raw_scale'])
-            if iteration in checkpoint_iterations:
-                print('\n[ITER {}] Saving Checkpoint'.format(iteration))
-                ckpt = (gaussians.capture(), motion_net.state_dict(), motion_optimizer.state_dict(), iteration)
-                torch.save(ckpt, scene.model_path + '/chkpnt_face_' + str(iteration) + '.pth')
-                torch.save(ckpt, scene.model_path + '/chkpnt_face_latest' + '.pth')
 
-                if use_lpmr:
-                    lpmr_ckpt = {
-                        "rank": int(lpmr_rank),
-                        "exp_scale": float(lpmr_exp_scale),
-                        "jaw_scale": float(lpmr_jaw_scale),
-                        "state_dict": (
-                            motion_net
-                            .personalized_residual
-                            .state_dict()
-                        ),
-                        "optimizer": (
-                            lpmr_optimizer
-                            .state_dict()
-                        ),
-                        "iteration": int(iteration),
-                    }
-
-                    # Iteration-specific sidecar:
-                    # used for exact training resume.
-                    lpmr_iter_path = os.path.join(
-                        scene.model_path,
-                        f"lpmr_{iteration}.pth",
-                    )
-
-                    torch.save(
-                        lpmr_ckpt,
-                        lpmr_iter_path,
-                    )
-
-                    # Convenience latest checkpoint.
-                    torch.save(
-                        lpmr_ckpt,
-                        os.path.join(
-                            scene.model_path,
-                            "lpmr_latest.pth",
-                        ),
-                    )
-                if deform_optimizer is not None:
-                    torch.save(gaussians.deform_code.detach().cpu(), scene.model_path + '/deform_code.pth')
-                    # Self-contained: stash the frozen shared decoder next to the code so
-                    # evaluation needs only the model dir.
-                    torch.save(gaussians.deform_decoder.state_dict(), scene.model_path + '/deform_decoder.pth')
             if iteration < opt.densify_until_iter:
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
@@ -701,6 +654,54 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if deform_optimizer is not None:
                         deform_optimizer.step()
                         deform_optimizer.zero_grad(set_to_none=True)
+            if iteration in checkpoint_iterations:
+                print('\n[ITER {}] Saving Checkpoint'.format(iteration))
+                ckpt = (gaussians.capture(), motion_net.state_dict(), motion_optimizer.state_dict(), iteration)
+                torch.save(ckpt, scene.model_path + '/chkpnt_face_' + str(iteration) + '.pth')
+                torch.save(ckpt, scene.model_path + '/chkpnt_face_latest' + '.pth')
+
+                if use_lpmr:
+                    lpmr_ckpt = {
+                        "rank": int(lpmr_rank),
+                        "exp_scale": motion_net.personalized_residual.exp_scale.item(),
+                        "jaw_scale": motion_net.personalized_residual.jaw_scale.item(),
+                        "state_dict": (
+                            motion_net
+                            .personalized_residual
+                            .state_dict()
+                        ),
+                        "optimizer": (
+                            lpmr_optimizer
+                            .state_dict()
+                        ),
+                        "iteration": int(iteration),
+                    }
+
+                    # Iteration-specific sidecar:
+                    # used for exact training resume.
+                    lpmr_iter_path = os.path.join(
+                        scene.model_path,
+                        f"lpmr_{iteration}.pth",
+                    )
+
+                    torch.save(
+                        lpmr_ckpt,
+                        lpmr_iter_path,
+                    )
+
+                    # Convenience latest checkpoint.
+                    torch.save(
+                        lpmr_ckpt,
+                        os.path.join(
+                            scene.model_path,
+                            "lpmr_latest.pth",
+                        ),
+                    )
+                if deform_optimizer is not None:
+                    torch.save(gaussians.deform_code.detach().cpu(), scene.model_path + '/deform_code.pth')
+                    # Self-contained: stash the frozen shared decoder next to the code so
+                    # evaluation needs only the model dir.
+                    torch.save(gaussians.deform_decoder.state_dict(), scene.model_path + '/deform_decoder.pth')
     print('\n[FINAL] Saving final deformed Gaussians for the first 10 frames of each scene...')
     with torch.no_grad():
         # Save compact geometry snapshots for quick inspection.
