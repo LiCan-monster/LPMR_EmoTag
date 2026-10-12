@@ -167,16 +167,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             jaw_scale=lpmr_jaw_scale,
         )
 
-        # Frozen pretrained prior should be deterministic.
-        #
-        # This disables dropout in the frozen audio transformer,
-        # while still allowing gradients through it to LPMR.
-        motion_net.eval()
-
-        # LPMR itself contains no dropout/BN, but set train mode
-        # explicitly for semantic clarity.
-        lpmr.train()
-
         lpmr_optimizer = torch.optim.AdamW(
             lpmr.parameters(),
             lr=lpmr_lr,
