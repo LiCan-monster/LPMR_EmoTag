@@ -268,7 +268,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         motion_optimizer.load_state_dict(
             motion_optimizer_params
         )
-
         # -----------------------------------------
         # Restore LPMR optimizer state
         # -----------------------------------------
